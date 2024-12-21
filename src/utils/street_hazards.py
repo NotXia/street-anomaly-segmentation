@@ -11,12 +11,11 @@ from torch.utils.data import Dataset
 import torchvision
 from torchvision import transforms
 
-from enum import Enum
+from enum import IntEnum
 from typing import Optional
 
 
-
-class StreetHazardsClasses(Enum):
+class StreetHazardsClasses(IntEnum):
     UNLABELED       = 0
     BUILDING        = 1
     FENCE           = 2
@@ -37,8 +36,11 @@ class StreetHazardsDataset(Dataset):
     def __init__(
         self,
         odgt_path: str,
-        additional_transforms: Optional[torchvision.transforms] = None
+        more_transforms = None,
+        patch_size: tuple[int, int] = (720, 1280),
+        image_size: tuple[int, int] = (720, 1280)
     ):
+        assert (image_size[0] % patch_size[0] == 0) and (image_size[1] % patch_size[1] == 0)
         with open(odgt_path, "r") as f:
             odgt_data = json.load(f)
 
@@ -49,21 +51,37 @@ class StreetHazardsDataset(Dataset):
             }
             for data in odgt_data 
         ]
-        self.transforms = transforms.Compose([ transforms.ToTensor() ])
-        if additional_transforms is not None:
-            self.transforms = transforms.Compose([ self.transforms, additional_transforms ])
+        
+        self.image_transforms = transforms.Compose([ transforms.ToTensor() ])
+        self.more_transforms = more_transforms if more_transforms is not None else (lambda x: x)
+        
+        self.patch_size = patch_size
+        self.patches_per_row = image_size[1] // patch_size[1]
+        self.patches_per_col = image_size[0] // patch_size[0]
+        self.patches_per_image = self.patches_per_row * self.patches_per_col
 
     def __getitem__(self, idx):
-        image = Image.open(self.paths[idx]["image"]).convert("RGB")
-        annotation = Image.open(self.paths[idx]["annotation"])
+        path_idx = idx // self.patches_per_image
+        patch_idx = idx % self.patches_per_image
+        image = Image.open(self.paths[path_idx]["image"]).convert("RGB")
+        annotation = Image.open(self.paths[path_idx]["annotation"])
 
-        image = self.transforms(image)
-        annotation = torch.as_tensor(np.array(annotation), dtype=torch.int64) - 1 # Make class indexes start from 0
+        # Apply transforms
+        image = self.image_transforms(image)
+        image = self.more_transforms(image)
+        annotation = torch.as_tensor(transforms.functional.pil_to_tensor(annotation), dtype=torch.int64) - 1 # Make class indexes start from 0
+        annotation = self.more_transforms(annotation).squeeze(0)
+
+        # Determine patch
+        offset_h = (patch_idx // self.patches_per_row) * self.patch_size[0]
+        offset_w = (patch_idx % self.patches_per_col) * self.patch_size[1]
+        image = image[:, offset_h:offset_h+self.patch_size[0], offset_w:offset_w+self.patch_size[1]]
+        annotation = annotation[offset_h:offset_h+self.patch_size[0], offset_w:offset_w+self.patch_size[1]]
 
         return image, annotation
 
     def __len__(self):
-        return len(self.paths)
+        return len(self.paths) * self.patches_per_image
 
 
 COLORS = np.array([
