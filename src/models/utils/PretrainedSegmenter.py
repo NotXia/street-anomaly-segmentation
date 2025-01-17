@@ -73,7 +73,7 @@ class PretrainedSegmenter(L.LightningModule):
         loss = F.cross_entropy(logits, labels)
 
         self.val_miou_acc.add(torch.argmax(logits, dim=1), labels)
-        self.log("train_loss", loss)
+        self.log("val_loss", loss)
         return loss
 
     def on_train_epoch_end(self):
