@@ -36,9 +36,13 @@ class StreetHazardsDataset(Dataset):
     def __init__(
         self,
         odgt_path: str,
-        more_transforms = None,
+        more_transforms1 = None,
+        more_transforms2 = None,
         patch_size: tuple[int, int] = (720, 1280),
-        image_size: tuple[int, int] = (720, 1280)
+        image_size: tuple[int, int] = (720, 1280),
+        random_masking: bool = False,
+        random_masking_ratio: float = 0.1,
+        random_masking_seed: int = 42
     ):
         assert (image_size[0] % patch_size[0] == 0) and (image_size[1] % patch_size[1] == 0)
         with open(odgt_path, "r") as f:
@@ -53,12 +57,17 @@ class StreetHazardsDataset(Dataset):
         ]
         
         self.image_transforms = transforms.Compose([ transforms.ToTensor() ])
-        self.more_transforms = more_transforms if more_transforms is not None else (lambda x: x)
-        
+        self.more_transforms1 = more_transforms1 if more_transforms1 is not None else (lambda x: x)
+        self.more_transforms2 = more_transforms2 if more_transforms2 is not None else (lambda x: x)
+
         self.patch_size = patch_size
-        self.patches_per_row = image_size[1] // patch_size[1]
         self.patches_per_col = image_size[0] // patch_size[0]
+        self.patches_per_row = image_size[1] // patch_size[1]
         self.patches_per_image = self.patches_per_row * self.patches_per_col
+
+        self.do_random_masking = random_masking
+        self.random_masking_ratio = random_masking_ratio
+        self.random_masking_rng = np.random.default_rng(random_masking_seed) if random_masking else None
 
     def __getitem__(self, idx):
         path_idx = idx // self.patches_per_image
@@ -68,16 +77,28 @@ class StreetHazardsDataset(Dataset):
 
         # Apply transforms
         image = self.image_transforms(image)
-        image = self.more_transforms(image)
+        image = self.more_transforms1(image)
         annotation = torch.as_tensor(transforms.functional.pil_to_tensor(annotation), dtype=torch.int64) - 1 # Make class indexes start from 0
-        annotation = self.more_transforms(annotation).squeeze(0)
+        annotation = self.more_transforms2(annotation).squeeze(0)
 
         # Determine patch
         offset_h = (patch_idx // self.patches_per_row) * self.patch_size[0]
-        offset_w = (patch_idx % self.patches_per_col) * self.patch_size[1]
+        offset_w = (patch_idx % self.patches_per_row) * self.patch_size[1]
         image = image[:, offset_h:offset_h+self.patch_size[0], offset_w:offset_w+self.patch_size[1]]
         annotation = annotation[offset_h:offset_h+self.patch_size[0], offset_w:offset_w+self.patch_size[1]]
 
+        if self.do_random_masking:
+            mask_h_start = self.random_masking_rng.integers(0, image.shape[1])
+            mask_h_end = mask_h_start + int( self.random_masking_rng.normal(image.shape[1]*self.random_masking_ratio, image.shape[1]*self.random_masking_ratio) )
+            if mask_h_end < mask_h_start: mask_h_start, mask_h_end = mask_h_end, mask_h_start
+            mask_w_start = self.random_masking_rng.integers(0, image.shape[2])
+            mask_w_end = mask_w_start + int( self.random_masking_rng.normal(image.shape[2]*self.random_masking_ratio, image.shape[2]*self.random_masking_ratio) )
+            if mask_w_end < mask_w_start: mask_w_start, mask_w_end = mask_w_end, mask_w_start
+
+            for c in range(image.shape[0]):
+                image[c, mask_h_start:mask_h_end, mask_w_start:mask_w_end] = self.random_masking_rng.random()
+            annotation[mask_h_start:mask_h_end, mask_w_start:mask_w_end] = StreetHazardsClasses.ANOMALY
+            
         return image, annotation
 
     def __len__(self):
@@ -101,22 +122,24 @@ COLORS = np.array([
     [ 60, 250, 240],  # anomaly      =  13,
 ])
 
-def visualize_annotation(annotation_img: np.ndarray|torch.Tensor):
+def visualize_annotation(annotation_img: np.ndarray|torch.Tensor, ax=None):
     """
     Adapted from https://github.com/CVLAB-Unibo/ml4cv-assignment/blob/master/utils/visualize.py
     """
+    if ax is None: ax = plt.gca()
     annotation_img = np.asarray(annotation_img)
     img_new = np.zeros((*annotation_img.shape, 3))
 
     for index, color in enumerate(COLORS):
         img_new[annotation_img == index] = color
 
-    plt.imshow(img_new / 255.0)
-    plt.xticks([])
-    plt.yticks([])
+    ax.imshow(img_new / 255.0)
+    ax.set_xticks([])
+    ax.set_yticks([])
 
-def visualize_scene(img: np.ndarray|torch.Tensor):
+def visualize_scene(img: np.ndarray|torch.Tensor, ax=None):
+    if ax is None: ax = plt.gca()
     img = np.asarray(img)
-    plt.imshow(np.moveaxis(img, 0, -1))
-    plt.xticks([])
-    plt.yticks([])
+    ax.imshow(np.moveaxis(img, 0, -1))
+    ax.set_xticks([])
+    ax.set_yticks([])
