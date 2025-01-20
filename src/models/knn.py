@@ -54,7 +54,22 @@ def extract_hidden_states(
     return torch.concat(all_hidden_states, dim=0)
 
 
-def _get_ood_scores(knn: NearestNeighbors, embeddings: torch.Tensor):
+def sample_hidden_states(hidden_states: torch.Tensor, num_out: int, seed=42) -> torch.Tensor:
+    """
+    Randomly samples embeddings from a given stack of hidden states.
+
+    Args:
+        hidden_states (torch.Tensor): Hidden states of shape N x emb to sample from.
+        num_out (int): Number of embeddings to sample.
+        seed (int)
+    
+    Returns:
+        embeddings (torch.Tensor): Sampled embeddings of shape num_out x emb.
+    """
+    return hidden_states[ np.random.default_rng(seed).integers(0, len(hidden_states), num_out) ]
+
+
+def _get_ood_scores(knn: NearestNeighbors, embeddings: torch.Tensor) -> torch.Tensor:
     """
     Computes the OOD scores for each embedding based on the average distance to the nearest neighbors.
 

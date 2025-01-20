@@ -53,7 +53,7 @@ class AccumulatorBinaryAUPR:
         if labels.dim() == 2: labels = labels.unsqueeze(0)
         preds, labels = preds.cpu(), labels.cpu()
         for p, l in zip(preds, labels):
-            self.aupr_accumulator += average_precision_score(l.type(torch.int16).flatten(), p.type(torch.float16).flatten())
+            self.aupr_accumulator += average_precision_score(l.type(torch.int32).flatten().numpy(), p.type(torch.float32).flatten().numpy())
             self.auprs_count += 1
 
     def compute(self):
@@ -71,7 +71,6 @@ def evaluate_model(
         tot_classes = len(StreetHazardsClasses), 
         anomaly_class = StreetHazardsClasses.ANOMALY,
         batch_size = 1, 
-        # patch_size = None, 
         compute_miou = True, 
         compute_ap = True, 
         device = "cuda", 
