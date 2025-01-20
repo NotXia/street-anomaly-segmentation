@@ -33,16 +33,18 @@ class StandardPredictor(BasePredictor):
 
 
 class SmoothedPredictor(BasePredictor):
-    def __init__(self, model: BaseSegmenterAndDetector, smooth_segmentation=True, smooth_anomaly=True):
+    def __init__(self, model: BaseSegmenterAndDetector, smooth_segmentation=False, smooth_anomaly=True, slic_num_components=200, slic_compactness=20):
         super().__init__(model)
         assert smooth_segmentation or smooth_anomaly, "Nothing to smooth"
-        self.slic = Slic(num_components=500, compactness=1)
         self.smooth_segmentation = smooth_segmentation
         self.smooth_anomaly = smooth_anomaly
-
+        self.slic_num_components = slic_num_components
+        self.slic_compactness = slic_compactness
+    
+    @torch.no_grad()
     def __call__(self, inputs):
-        with torch.no_grad():
-            segm_logits, anom_preds = self.model(inputs)
+        slic = Slic(num_components=self.slic_num_components, compactness=self.slic_compactness) # Must be recreated every time for determinism
+        segm_logits, anom_preds = self.model(inputs)
         segm_maps = torch.argmax(segm_logits, dim=1)
         anom_preds = anom_preds.squeeze(1)
 
@@ -51,7 +53,7 @@ class SmoothedPredictor(BasePredictor):
             image = np.moveaxis(image.numpy(), 0, -1)
             image = (image*255).astype(np.uint8)
             image = np.ascontiguousarray(image)
-            segments = self.slic.iterate(image)
+            segments = slic.iterate(image)
 
             for j in np.unique(segments):
                 if self.smooth_segmentation:
