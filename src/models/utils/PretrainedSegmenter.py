@@ -2,21 +2,33 @@ import torch
 import torch.nn.functional as F
 import lightning as L
 from torchvision.models.segmentation import deeplabv3_mobilenet_v3_large, deeplabv3_resnet50
+import transformers
 from transformers import AutoImageProcessor, AutoModelForSemanticSegmentation
 
 from utils.street_hazards import StreetHazardsClasses
-from typing import Optional
+from utils.eval import AccumulatorMIoU
+from typing import Optional, Union, Literal
 
 
 
 class PretrainedSegmenter(L.LightningModule):
-    def __init__(self, optimizer_args: dict, image_size: Optional[tuple[int, int]]=None, num_classes: int=len(StreetHazardsClasses)-1):
+    def __init__(self, 
+        optimizer_args: dict, 
+        image_size: Optional[tuple[int, int]], 
+        num_classes: int, 
+        class_weights: Optional[torch.Tensor],
+        multi_label: bool
+    ):
         super().__init__()
         self.model = None
         self.image_size = image_size
         self.num_classes = num_classes
+        self.class_weights = class_weights if class_weights is not None else torch.ones(num_classes)
+        self.multi_label = multi_label
         self.optimizer_args = optimizer_args
-    
+        self.train_miou_acc = AccumulatorMIoU(num_classes, None)
+        self.val_miou_acc = AccumulatorMIoU(num_classes, None)
+
 
     def _forward(self, images) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
         """
@@ -45,23 +57,40 @@ class PretrainedSegmenter(L.LightningModule):
     
 
     @staticmethod
-    def get(model_name: str, optimizer_args: dict={}, image_size: Optional[tuple[int, int]]=None, num_classes: int=len(StreetHazardsClasses)-1):
+    def get(
+        model_name: Union[Literal["deeplabv3_mobilenet", "deeplabv3_resnet50"], str], 
+        optimizer_args: dict = {}, 
+        image_size: Optional[tuple[int, int]] = None, 
+        num_classes: int = len(StreetHazardsClasses)-1,
+        class_weights: Optional[torch.Tensor] = None,
+        multi_label: bool = False
+    ):
         match model_name:
             case "deeplabv3_mobilenet":
-                return _PretrainedPytorchSegmenter(model_name, optimizer_args, image_size, num_classes)
+                return _PretrainedPytorchSegmenter(model_name, optimizer_args, image_size, num_classes, class_weights, multi_label)
             case "deeplabv3_resnet50":
-                return _PretrainedPytorchSegmenter(model_name, optimizer_args, image_size, num_classes)
+                return _PretrainedPytorchSegmenter(model_name, optimizer_args, image_size, num_classes, class_weights, multi_label)
             case _:
-                return _PretrainedHuggingFaceSegmenter(model_name, optimizer_args, image_size, num_classes)
+                return _PretrainedHuggingFaceSegmenter(model_name, optimizer_args, image_size, num_classes, class_weights, multi_label)
 
 
     def configure_optimizers(self):
-        return torch.optim.AdamW(self.model.parameters(), **self.optimizer_args)
+        optimizer = torch.optim.AdamW(self.model.parameters(), **self.optimizer_args)
+        return optimizer
+
+    def __loss(self, logits, labels):
+        if self.multi_label:
+            loss = 0
+            for c in range(self.num_classes):
+                loss += F.binary_cross_entropy_with_logits(logits[:, c], (labels == c).type(torch.float32))
+            return loss
+        else:
+            return F.cross_entropy(logits, labels, weight=self.class_weights)
 
     def training_step(self, batch, batch_idx):
         images, labels = batch
         logits = self(images)
-        loss = F.cross_entropy(logits, labels)
+        loss = self.__loss(logits, labels)
 
         self.train_miou_acc.add(torch.argmax(logits, dim=1), labels)
         self.log("train_loss", loss)
@@ -70,7 +99,7 @@ class PretrainedSegmenter(L.LightningModule):
     def validation_step(self, batch, batch_idx):
         images, labels = batch
         logits = self(images)
-        loss = F.cross_entropy(logits, labels)
+        loss = self.__loss(logits, labels)
 
         self.val_miou_acc.add(torch.argmax(logits, dim=1), labels)
         self.log("val_loss", loss)
@@ -92,8 +121,9 @@ class PretrainedSegmenter(L.LightningModule):
 
 
 class _PretrainedPytorchSegmenter(PretrainedSegmenter):
-    def __init__(self, model_name: str, optimizer_args: dict, image_size: Optional[tuple[int, int]]=None, num_classes: int=len(StreetHazardsClasses)-1):
-        super().__init__(optimizer_args, image_size, num_classes)
+    def __init__(self, model_name, optimizer_args, image_size, num_classes, class_weights, multi_label):
+        super().__init__(optimizer_args, image_size, num_classes, class_weights, multi_label)
+
         match model_name:
             case "deeplabv3_mobilenet":
                 self.model = deeplabv3_mobilenet_v3_large(num_classes=num_classes)
@@ -112,11 +142,13 @@ class _PretrainedPytorchSegmenter(PretrainedSegmenter):
 
 
 class _PretrainedHuggingFaceSegmenter(PretrainedSegmenter):
-    def __init__(self, model_name: str, optimizer_args: dict, image_size: Optional[tuple[int, int]]=None, num_classes: int=len(StreetHazardsClasses)-1):
-        super().__init__(optimizer_args, image_size, num_classes)
+    def __init__(self, model_name, optimizer_args, image_size, num_classes, class_weights, multi_label):
+        super().__init__(optimizer_args, image_size, num_classes, class_weights, multi_label)
+        transformers.utils.logging.set_verbosity_error() # Suppress warning for non-trained head
         self.processor = AutoImageProcessor.from_pretrained(model_name)
         self.model = AutoModelForSemanticSegmentation.from_pretrained(model_name, num_labels=num_classes, ignore_mismatched_sizes=True)
         self.image_size = (self.model.config.image_size, self.model.config.image_size)
+        transformers.utils.logging.set_verbosity_warning()
 
     def _forward(self, images):
         inputs = self.processor(images=images, return_tensors="pt", do_resize=False, do_rescale=False).to(self.model.device)
