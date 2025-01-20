@@ -7,6 +7,7 @@ import matplotlib.pyplot as plt
 from PIL import Image
 
 import torch
+import torch.nn.functional as F
 from torch.utils.data import Dataset
 import torchvision
 from torchvision import transforms
@@ -38,13 +39,10 @@ class StreetHazardsDataset(Dataset):
         odgt_path: str,
         more_transforms1 = None,
         more_transforms2 = None,
-        patch_size: tuple[int, int] = (720, 1280),
-        image_size: tuple[int, int] = (720, 1280),
-        random_masking: bool = False,
-        random_masking_ratio: float = 0.1,
-        random_masking_seed: int = 42
+        random_crop_size: Optional[tuple[int, int]] = None,
+        add_random_anomalies: bool = False,
+        dataset_path: str = "./data_voc"
     ):
-        assert (image_size[0] % patch_size[0] == 0) and (image_size[1] % patch_size[1] == 0)
         with open(odgt_path, "r") as f:
             odgt_data = json.load(f)
 
@@ -56,54 +54,58 @@ class StreetHazardsDataset(Dataset):
             for data in odgt_data 
         ]
         
-        self.image_transforms = transforms.Compose([ transforms.ToTensor() ])
+        self.to_tensor_transform = transforms.ToTensor()
         self.more_transforms1 = more_transforms1 if more_transforms1 is not None else (lambda x: x)
         self.more_transforms2 = more_transforms2 if more_transforms2 is not None else (lambda x: x)
 
-        self.patch_size = patch_size
-        self.patches_per_col = image_size[0] // patch_size[0]
-        self.patches_per_row = image_size[1] // patch_size[1]
-        self.patches_per_image = self.patches_per_row * self.patches_per_col
+        self.random_crop_size = random_crop_size
 
-        self.do_random_masking = random_masking
-        self.random_masking_ratio = random_masking_ratio
-        self.random_masking_rng = np.random.default_rng(random_masking_seed) if random_masking else None
+        self.add_random_anomalies = add_random_anomalies
+        if self.add_random_anomalies:
+            try:
+                self.ds_anomaly = torchvision.datasets.VOCSegmentation(dataset_path, image_set="val")
+            except:
+                self.ds_anomaly = torchvision.datasets.VOCSegmentation(dataset_path, image_set="val", download=True)
 
     def __getitem__(self, idx):
-        path_idx = idx // self.patches_per_image
-        patch_idx = idx % self.patches_per_image
-        image = Image.open(self.paths[path_idx]["image"]).convert("RGB")
-        annotation = Image.open(self.paths[path_idx]["annotation"])
+        image = Image.open(self.paths[idx]["image"]).convert("RGB")
+        annotation = Image.open(self.paths[idx]["annotation"])
 
         # Apply transforms
-        image = self.image_transforms(image)
+        image = self.to_tensor_transform(image)
         image = self.more_transforms1(image)
         annotation = torch.as_tensor(transforms.functional.pil_to_tensor(annotation), dtype=torch.int64) - 1 # Make class indexes start from 0
         annotation = self.more_transforms2(annotation).squeeze(0)
 
-        # Determine patch
-        offset_h = (patch_idx // self.patches_per_row) * self.patch_size[0]
-        offset_w = (patch_idx % self.patches_per_row) * self.patch_size[1]
-        image = image[:, offset_h:offset_h+self.patch_size[0], offset_w:offset_w+self.patch_size[1]]
-        annotation = annotation[offset_h:offset_h+self.patch_size[0], offset_w:offset_w+self.patch_size[1]]
+        # Apply random crop
+        if self.random_crop_size is not None:
+            i, j, h, w = transforms.RandomCrop.get_params(image, output_size=self.random_crop_size)
+            image = transforms.functional.crop(image, i, j, h, w)
+            annotation = transforms.functional.crop(annotation, i, j, h, w)
+        
+        # Add random anomaly
+        if self.add_random_anomalies:
+            anomaly_max_size = (np.random.randint(image.shape[1]*0.05, image.shape[1]*0.5), np.random.randint(image.shape[2]*0.05, image.shape[2]*0.5))
+            anomaly_idx = np.random.randint(0, len(self.ds_anomaly))
+            i, j, h, w = transforms.RandomCrop.get_params(image, output_size=anomaly_max_size)
+            anomaly_image = self.to_tensor_transform(self.ds_anomaly[anomaly_idx][0])
+            anomaly_annot = torch.from_numpy(np.array(self.ds_anomaly[anomaly_idx][1])).unsqueeze(0)
+            possible_classes = np.unique(anomaly_annot)[1:-1] # Ignore 0 and 255
+            # There are cases where no classes are available. They are very rare, so we can just skip adding an anomaly for this image.
+            if len(possible_classes) != 0:
+                anomaly_class = np.random.choice(possible_classes)
 
-        if self.do_random_masking:
-            mask_h_start = self.random_masking_rng.integers(0, image.shape[1])
-            mask_h_end = mask_h_start + int( self.random_masking_rng.normal(image.shape[1]*self.random_masking_ratio, image.shape[1]*self.random_masking_ratio) )
-            if mask_h_end < mask_h_start: mask_h_start, mask_h_end = mask_h_end, mask_h_start
-            mask_w_start = self.random_masking_rng.integers(0, image.shape[2])
-            mask_w_end = mask_w_start + int( self.random_masking_rng.normal(image.shape[2]*self.random_masking_ratio, image.shape[2]*self.random_masking_ratio) )
-            if mask_w_end < mask_w_start: mask_w_start, mask_w_end = mask_w_end, mask_w_start
+                anomaly_image = F.interpolate(anomaly_image.unsqueeze(0), size=(h, w), mode="bilinear").squeeze(0)
+                anomaly_annot = F.interpolate(anomaly_annot.unsqueeze(0), size=(h, w), mode="nearest").squeeze((0, 1))
 
-            for c in range(image.shape[0]):
-                image[c, mask_h_start:mask_h_end, mask_w_start:mask_w_end] = self.random_masking_rng.random()
-            annotation[mask_h_start:mask_h_end, mask_w_start:mask_w_end] = StreetHazardsClasses.ANOMALY
-            
+                image[:, i:i+h, j:j+w][:, anomaly_annot == anomaly_class] = anomaly_image[:, anomaly_annot == anomaly_class]
+                annotation[i:i+h, j:j+w][anomaly_annot == anomaly_class] = StreetHazardsClasses.ANOMALY
+
         return image, annotation
 
     def __len__(self):
-        return len(self.paths) * self.patches_per_image
-
+        return len(self.paths)
+    
 
 COLORS = np.array([
     [  0,   0,   0],  # unlabeled    =   0,
@@ -137,9 +139,30 @@ def visualize_annotation(annotation_img: np.ndarray|torch.Tensor, ax=None):
     ax.set_xticks([])
     ax.set_yticks([])
 
-def visualize_scene(img: np.ndarray|torch.Tensor, ax=None):
+def visualize_scene(image: np.ndarray|torch.Tensor, ax=None):
     if ax is None: ax = plt.gca()
-    img = np.asarray(img)
-    ax.imshow(np.moveaxis(img, 0, -1))
+    image = np.asarray(image)
+    ax.imshow(np.moveaxis(image, 0, -1))
     ax.set_xticks([])
     ax.set_yticks([])
+
+def visualize_anomaly(anomaly_map: np.ndarray|torch.Tensor, alpha=1, ax=None):
+    if ax is None: ax = plt.gca()
+    ax.imshow(anomaly_map, cmap="Reds", alpha=alpha)
+    ax.set_xticks([])
+    ax.set_yticks([])
+
+def show_results(image, labels, segm_preds, anomaly_map, figsize=(18, 5)):
+    plt.figure(figsize=(18, 5))
+    plt.subplot(1, 5, 1)
+    visualize_scene(image)
+    plt.subplot(1, 5, 2)
+    visualize_annotation(labels)
+    plt.subplot(1, 5, 3)
+    visualize_annotation(segm_preds)
+    plt.subplot(1, 5, 4)
+    visualize_scene(image)
+    visualize_anomaly(anomaly_map, alpha=0.6)
+    plt.subplot(1, 5, 5)
+    visualize_anomaly(anomaly_map)
+    plt.show()

@@ -166,3 +166,5 @@ cython_debug/
 src/data/*
 weights
 checkpoints
+
+src/data_voc
