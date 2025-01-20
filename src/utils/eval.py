@@ -6,8 +6,7 @@ from torch.utils.data import DataLoader
 from sklearn.metrics import average_precision_score
 
 from .street_hazards import StreetHazardsClasses
-from .misc import sliding_window_inference
-
+from .predictor import BasePredictor
 
 
 class AccumulatorMIoU:
@@ -65,45 +64,40 @@ class AccumulatorBinaryAUPR:
         self.auprs_count = 0
 
 
+@torch.no_grad()
 def evaluate_model(
-        model,
+        predictor: BasePredictor,
         ds, 
         tot_classes = len(StreetHazardsClasses), 
         anomaly_class = StreetHazardsClasses.ANOMALY,
         batch_size = 1, 
         # patch_size = None, 
+        compute_miou = True, 
         compute_ap = True, 
         device = "cuda", 
     ):
+    assert compute_miou or compute_ap
     dl = DataLoader(ds, batch_size=batch_size, shuffle=False)
-    model.to(device).eval()
-    miou_acc = AccumulatorMIoU(tot_classes-1, anomaly_class)
-    if compute_ap:
-        aupr_acc = AccumulatorBinaryAUPR()
+    predictor.to(device)
+    miou_acc = AccumulatorMIoU(tot_classes-1, anomaly_class) if compute_miou else None
+    aupr_acc = AccumulatorBinaryAUPR() if compute_ap else None
 
     for inputs, labels in (pbar := tqdm(dl)):
         inputs = inputs.to(device)
+        labels = labels.cpu()
 
-        with torch.no_grad():
-            segm_pred, anom_pred = model(inputs)
-            # if patch_size is None:
-            #     segm_pred, anom_pred = model(inputs)
-            # else:
-            #     preds = []
-            #     for image in inputs:
-            #         preds.append( sliding_window_inference(model, image, patch_size, device).unsqueeze(0) )
-            #     preds = torch.cat(preds)
-            # if preds.dim() == 4: preds = preds.squeeze(1)
-        segm_pred, anom_pred, labels = segm_pred.cpu(), anom_pred.cpu(), labels.cpu()
-        segm_pred, anom_pred = segm_pred.squeeze(0), anom_pred.squeeze(0)
+        segm_maps, anom_preds = predictor(inputs)
+        segm_maps, anom_preds = segm_maps.cpu(), anom_preds.cpu()
 
-        miou_acc.add(torch.argmax(segm_pred, dim=0), labels)
-        if compute_ap:
-            aupr_acc.add(anom_pred, (labels == anomaly_class))
+        for i in range(len(inputs)):
+            if compute_miou:
+                miou_acc.add(segm_maps[i], labels[i])
+            if compute_ap:
+                aupr_acc.add(anom_preds[i], (labels[i] == anomaly_class))
 
-        pbar.set_description(f"mIoU: {miou_acc.compute()*100:.2f} -- AUPR: {aupr_acc.compute()*100 if compute_ap else 0:.2f}")
+        pbar.set_description(f"mIoU: {miou_acc.compute()*100 if compute_miou else 0:.2f} -- AUPR: {aupr_acc.compute()*100 if compute_ap else 0:.2f}")
 
     return {
-        "miou": miou_acc.compute(),
+        "miou": miou_acc.compute() if compute_miou else None,
         "ap": aupr_acc.compute() if compute_ap else None
     }
