@@ -1,7 +1,15 @@
+"""
+Anomaly detectors based on Gaussian mixture models.
+
+Inspired by the paper "VT-ADL: A Vision Transformer Network for Image Anomaly Detection and Localization" <https://arxiv.org/abs/2104.10036>.
+"""
+
 import torch
 import torch.nn.functional as F
 import lightning as L
 import numpy as np
+from tqdm.auto import tqdm
+from sklearn.mixture import GaussianMixture
 
 from models.utils.BaseSegmenterAndDetector import BaseSegmenterAndDetector
 from models.utils.ViTAutoencoder import ViTAutoencoder
@@ -33,6 +41,9 @@ def _reshape_probs_as_image(probs):
 
 class AutoencoderMDN(BaseSegmenterAndDetector, L.LightningModule):
     def __init__(self, autoencoder: ViTAutoencoder, num_gaussians: int, pretrained_segmenter: PretrainedSegmenter, optimizer_args={}):
+        """
+        Deep density estimator applied on the latent space of an autoencoder.
+        """
         super().__init__()
         self.autoencoder = autoencoder
         self.mdn = GaussianMixtureDensityNetwork(self.autoencoder.get_hidden_sizes()[-1], num_gaussians)
@@ -87,7 +98,7 @@ class AutoencoderMDN(BaseSegmenterAndDetector, L.LightningModule):
 
         self.log("train_mse", loss_mse)
         self.log("train_ssim", loss_ssim)
-        self.log("train_ll", loss_likelihood)
+        self.log("train_nll", loss_likelihood)
         self.log("train_loss", loss)
         return loss
 
@@ -98,7 +109,7 @@ class AutoencoderMDN(BaseSegmenterAndDetector, L.LightningModule):
 
         self.log("val_mse", loss_mse)
         self.log("val_ssim", loss_ssim)
-        self.log("val_ll", loss_likelihood)
+        self.log("val_nll", loss_likelihood)
         self.log("val_loss", loss)
         return loss
 
@@ -109,13 +120,16 @@ class AutoencoderMDN(BaseSegmenterAndDetector, L.LightningModule):
             f"Epoch {self.current_epoch} --- train_loss: {metrics['train_loss'].item():.4f} -- val_loss: {metrics['val_loss'].item():.4f}"
             f" | train_mse: {metrics['train_mse'].item():.4f} -- val_mse: {metrics['val_mse'].item():.4f}"
             f" | train_ssim: {metrics['train_ssim'].item():.4f} -- val_ssim: {metrics['val_ssim'].item():.4f}"
-            f" | train_ll: {metrics['train_ll'].item():.4f} -- val_ll: {metrics['val_ll'].item():.4f}"
+            f" | train_nll: {metrics['train_nll'].item():.4f} -- val_nll: {metrics['val_nll'].item():.4f}"
         )
 
 
 
 class SegmenterMDN(BaseSegmenterAndDetector, L.LightningModule):
     def __init__(self, segmenter: PretrainedSegmenter, num_gaussians: int, optimizer_args={}, num_classes=len(StreetHazardsClasses)-1):
+        """
+        Deep density estimator applied on the embedding space of a segmenter.
+        """
         super().__init__()
         self.segmenter = segmenter
         self.mdn = GaussianMixtureDensityNetwork(self.segmenter.get_hidden_sizes()[-1], num_gaussians)
@@ -199,3 +213,47 @@ class SegmenterMDN(BaseSegmenterAndDetector, L.LightningModule):
 
         self.train_miou_acc.reset()
         self.val_miou_acc.reset()
+
+
+
+class SegmenterGMM(BaseSegmenterAndDetector, torch.nn.Module):
+    def __init__(self, segmenter: PretrainedSegmenter, num_gaussians=10, hidden_states_index=-1, seed=42):
+        """
+        Traditional GMM applied on the latent space of an autoencoder.
+        """
+        super().__init__()
+        self.segmenter = segmenter.eval()
+        self.hidden_states_index = hidden_states_index
+        self.seed = seed
+        self.gmm = GaussianMixture(num_gaussians, covariance_type="full", random_state=seed, verbose=1)
+    
+    @torch.no_grad()
+    def fit(self, dl_train):
+        fit_inputs = []
+        self.segmenter.eval()
+
+        # Extracts hiddens states
+        for images, _ in tqdm(dl_train):
+            _, hidden_states = self.segmenter(images, return_hidden_states=True)
+            latents = hidden_states[self.hidden_states_index].permute((0, 2, 3, 1)).flatten(start_dim=0, end_dim=2).cpu()
+            fit_inputs.append(latents)
+        fit_inputs = torch.concat(fit_inputs, dim=0)
+        
+        self.gmm.fit(fit_inputs)
+        return self
+
+    def forward(self, inputs: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        logits, hidden_states = self.segmenter(inputs, return_hidden_states=True)
+        latents = hidden_states[self.hidden_states_index].permute((0, 2, 3, 1)).cpu() # B x H x W x emb
+        batch_size, latent_h, latent_w = latents.shape[0], latents.shape[1], latents.shape[2]
+        anom_scores = np.zeros((batch_size, latent_h, latent_w))
+
+        for i in range(len(inputs)):
+            gmm_queries = latents[i].flatten(start_dim=0, end_dim=1) # HW x emb
+            probs = self.gmm.predict_proba(gmm_queries)
+            anom_scores[i] = probs.mean(axis=1).reshape(latent_h, latent_w)
+
+        anom_preds = torch.from_numpy(anom_scores).unsqueeze(1)
+        anom_preds = F.interpolate(anom_preds, (inputs.shape[2], inputs.shape[3]), mode="bilinear")
+
+        return logits, anom_preds
