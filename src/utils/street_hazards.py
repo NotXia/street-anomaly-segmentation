@@ -4,6 +4,7 @@ from pathlib import Path
 
 import numpy as np
 import matplotlib.pyplot as plt
+from mpl_toolkits.axes_grid1 import make_axes_locatable
 from PIL import Image
 
 import torch
@@ -85,16 +86,17 @@ class StreetHazardsDataset(Dataset):
         
         # Add random anomaly
         if self.add_random_anomalies:
-            anomaly_max_size = (np.random.randint(image.shape[1]*0.05, image.shape[1]*0.5), np.random.randint(image.shape[2]*0.05, image.shape[2]*0.5))
-            anomaly_idx = np.random.randint(0, len(self.ds_anomaly))
-            i, j, h, w = transforms.RandomCrop.get_params(image, output_size=anomaly_max_size)
-            anomaly_image = self.to_tensor_transform(self.ds_anomaly[anomaly_idx][0])
-            anomaly_annot = torch.from_numpy(np.array(self.ds_anomaly[anomaly_idx][1])).unsqueeze(0)
-            possible_classes = np.unique(anomaly_annot)[1:-1] # Ignore 0 and 255
-            # There are cases where no classes are available. They are very rare, so we can just skip adding an anomaly for this image.
-            if len(possible_classes) != 0:
-                anomaly_class = np.random.choice(possible_classes)
+            for i in range(np.random.randint(1, 4)):
+                anomaly_max_size = (np.random.randint(image.shape[1]*0.1, image.shape[1]*0.3), np.random.randint(image.shape[2]*0.1, image.shape[2]*0.3))
+                i, j, h, w = transforms.RandomCrop.get_params(image, output_size=anomaly_max_size)
+                possible_classes = []
+                while len(possible_classes) == 0: # In some cases there are no classes available
+                    anomaly_idx = np.random.randint(0, len(self.ds_anomaly))
+                    anomaly_image = self.to_tensor_transform(self.ds_anomaly[anomaly_idx][0])
+                    anomaly_annot = torch.from_numpy(np.array(self.ds_anomaly[anomaly_idx][1])).unsqueeze(0)
+                    possible_classes = np.unique(anomaly_annot)[1:-1] # Ignore 0 and 255
 
+                anomaly_class = np.random.choice(possible_classes)
                 anomaly_image = F.interpolate(anomaly_image.unsqueeze(0), size=(h, w), mode="bilinear").squeeze(0)
                 anomaly_annot = F.interpolate(anomaly_annot.unsqueeze(0), size=(h, w), mode="nearest").squeeze((0, 1))
 
@@ -146,14 +148,20 @@ def visualize_scene(image: np.ndarray|torch.Tensor, ax=None):
     ax.set_xticks([])
     ax.set_yticks([])
 
-def visualize_anomaly(anomaly_map: np.ndarray|torch.Tensor, alpha=1, ax=None):
+def visualize_anomaly(anomaly_map: np.ndarray|torch.Tensor, alpha=1, ax=None, colorbar=False):
     if ax is None: ax = plt.gca()
-    ax.imshow(anomaly_map, cmap="Reds", alpha=alpha)
+    im = ax.imshow(anomaly_map, alpha=alpha)
     ax.set_xticks([])
     ax.set_yticks([])
 
-def show_results(image, labels, segm_preds, anomaly_map, figsize=(18, 5)):
-    plt.figure(figsize=(18, 5))
+    if colorbar:
+        divider = make_axes_locatable(ax)
+        cax = divider.append_axes("right", size="5%", pad=0.05)        
+        plt.gcf().colorbar(im, cax=cax, orientation="vertical")
+
+def show_results(image, labels, segm_preds, anomaly_map, figsize=(18, 2), title=""):
+    plt.figure(figsize=figsize)
+    plt.suptitle(title)
     plt.subplot(1, 5, 1)
     visualize_scene(image)
     plt.subplot(1, 5, 2)
@@ -164,5 +172,5 @@ def show_results(image, labels, segm_preds, anomaly_map, figsize=(18, 5)):
     visualize_scene(image)
     visualize_anomaly(anomaly_map, alpha=0.6)
     plt.subplot(1, 5, 5)
-    visualize_anomaly(anomaly_map)
+    visualize_anomaly(anomaly_map, colorbar=True)
     plt.show()
