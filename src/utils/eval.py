@@ -33,18 +33,18 @@ class AccumulatorMIoU:
         for p, l in zip(preds, labels):
             self.confusion_matrix += self._fast_hist( p.flatten(), l.flatten() )
 
-    def compute(self):
+    def compute(self, return_classwise_iou=False):
         hist = self.confusion_matrix
         with np.errstate(divide="ignore", invalid="ignore"):
             iou_c = np.diag(hist) / (hist.sum(axis=1) + hist.sum(axis=0) - np.diag(hist))
         mean_iou = np.nanmean(iou_c)
-        return mean_iou
+        return (mean_iou, iou_c.tolist()) if return_classwise_iou else mean_iou
     
     def reset(self):
         self.confusion_matrix = np.zeros((self.num_classes, self.num_classes))
 
 
-class AccumulatorBinaryAUPR:
+class AccumulatorAUPR:
     def __init__(self):
         self.reset()
 
@@ -79,7 +79,7 @@ def evaluate_model(
     dl = DataLoader(ds, batch_size=batch_size, shuffle=False)
     predictor.to(device)
     miou_acc = AccumulatorMIoU(tot_classes-1, anomaly_class) if compute_miou else None
-    aupr_acc = AccumulatorBinaryAUPR() if compute_ap else None
+    aupr_acc = AccumulatorAUPR() if compute_ap else None
 
     for inputs, labels in (pbar := tqdm(dl)):
         inputs = inputs.to(device)
@@ -96,7 +96,11 @@ def evaluate_model(
 
         pbar.set_description(f"mIoU: {miou_acc.compute()*100 if compute_miou else 0:.2f} -- AUPR: {aupr_acc.compute()*100 if compute_ap else 0:.2f}")
 
-    return {
-        "miou": miou_acc.compute() if compute_miou else None,
-        "ap": aupr_acc.compute() if compute_ap else None
-    }
+    out = {}
+    if compute_miou:
+        miou, iou_c = miou_acc.compute(return_classwise_iou=True)
+        out["miou"] = miou
+        out["iou_c"] = iou_c
+    if compute_ap:
+        out["ap"] = aupr_acc.compute()
+    return out
