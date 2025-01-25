@@ -10,6 +10,7 @@ from sklearn.cluster import KMeans
 import torch
 import torch.nn.functional as F
 from tqdm.auto import tqdm
+import pickle
 
 from models.utils.BaseSegmenterAndDetector import BaseSegmenterAndDetector
 from models.utils.PretrainedSegmenter import PretrainedSegmenter
@@ -41,10 +42,10 @@ def extract_hidden_states(
 
     for images, _ in tqdm(dataloader):
         if isinstance(model, PretrainedSegmenter):
-            _, hidden_states = model(images, return_hidden_states=True)
+            _, hidden_states = model(images.to(model.device), return_hidden_states=True)
             embeddings = hidden_states[hidden_states_index]
         elif isinstance(model, ViTAutoencoder):
-            _, embeddings = model(images)
+            _, embeddings = model(images.to(model.device))
         else:
             raise RuntimeError("Unsupported model")
         
@@ -69,7 +70,7 @@ def sample_hidden_states(hidden_states: torch.Tensor, num_out: int, seed=42) -> 
     return hidden_states[ np.random.default_rng(seed).integers(0, len(hidden_states), num_out) ]
 
 
-def _get_ood_scores(knn: NearestNeighbors, embeddings: torch.Tensor) -> torch.Tensor:
+def get_ood_scores(knn: NearestNeighbors, embeddings: torch.Tensor) -> torch.Tensor:
     """
     Computes the OOD scores for each embedding based on the average distance to the nearest neighbors.
 
@@ -95,7 +96,7 @@ def _get_ood_scores(knn: NearestNeighbors, embeddings: torch.Tensor) -> torch.Te
 
 
 class KNNModel(BaseSegmenterAndDetector, torch.nn.Module):
-    def __init__(self, segmenter: PretrainedSegmenter, n_neighbors: int=3, hidden_states_index: int=-1):
+    def __init__(self, segmenter: PretrainedSegmenter, n_neighbors: int=1, hidden_states_index: int=-1):
         """
         Base k-NN anomaly detector that uses the embedding space of a segmenter.
         """
@@ -105,40 +106,41 @@ class KNNModel(BaseSegmenterAndDetector, torch.nn.Module):
         self.knn = NearestNeighbors(n_neighbors=n_neighbors, n_jobs=-1)
 
     def fit(self, hidden_states: torch.Tensor):
-        self.knn.fit(hidden_states)
+        self.knn.fit(hidden_states.type(torch.float32))
         return self
     
     @torch.no_grad()
     def forward(self, inputs: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        logits, hidden_states = self.segmenter(inputs, return_hidden_states=True)
+        logits, hidden_states = self.segmenter(inputs.to(self.segmenter.device), return_hidden_states=True)
         
-        ood_scores = _get_ood_scores(self.knn, hidden_states[self.hidden_states_index].cpu())
+        ood_scores = get_ood_scores(self.knn, hidden_states[self.hidden_states_index].cpu())
         ood_scores = F.interpolate(ood_scores.unsqueeze(1), (inputs.shape[2], inputs.shape[3]), mode="bilinear")
 
         return logits, ood_scores
+    
+    def save(self, path):
+        with open(path, "wb") as f:
+            pickle.dump(self.knn, f)
+
+    def load(self, path):
+        with open(path, "rb") as f:
+            self.knn = pickle.load(f)
 
 
-
-class KNNModelAE(BaseSegmenterAndDetector, torch.nn.Module):
+class KNNModelAE(KNNModel):
     """
     K-NN anomaly detector that uses the embedding space of an autoencoder.
     """
-    def __init__(self, segmenter: PretrainedSegmenter, ae: ViTAutoencoder, n_neighbors: int=3):
-        super().__init__()
-        self.segmenter = segmenter.eval()
+    def __init__(self, segmenter: PretrainedSegmenter, ae: ViTAutoencoder, n_neighbors: int=1):
+        super().__init__(segmenter, n_neighbors)
         self.ae = ae.eval()
-        self.knn = NearestNeighbors(n_neighbors=n_neighbors, n_jobs=-1)
-
-    def fit(self, hidden_states: torch.Tensor):
-        self.knn.fit(hidden_states)
-        return self
     
     @torch.no_grad()
     def forward(self, inputs: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        logits = self.segmenter(inputs)
+        logits = self.segmenter(inputs.to(self.segmenter.device))
         _, embeddings = self.ae(inputs)
 
-        ood_scores = _get_ood_scores(self.knn, embeddings.cpu())
+        ood_scores = get_ood_scores(self.knn, embeddings.cpu())
         ood_scores = F.interpolate(ood_scores.unsqueeze(1), (inputs.shape[2], inputs.shape[3]), mode="bilinear")
 
         return logits, ood_scores
@@ -149,12 +151,12 @@ class KmeansModel(KNNModel):
     """
     K-NN anomaly detector for segmentation models that uses k-means to reduce the embeddings used by k-NN.
     """
-    def __init__(self, segmenter: PretrainedSegmenter, num_clusters, n_neighbors=3, hidden_states_index=-1, seed=42):
+    def __init__(self, segmenter: PretrainedSegmenter, num_clusters=2000, n_neighbors=1, hidden_states_index=-1, seed=42):
         super().__init__(segmenter, n_neighbors, hidden_states_index)
         self.kmeans = KMeans(n_clusters=num_clusters, random_state=seed)
 
     @torch.no_grad()
     def fit(self, hidden_states: torch.Tensor):
         self.kmeans.fit(hidden_states)
-        self.knn.fit(self.kmeans.cluster_centers_) # Fit k-NN with centroids.
+        self.knn.fit(self.kmeans.cluster_centers_.astype(np.float32)) # Fit k-NN with centroids.
         return self
