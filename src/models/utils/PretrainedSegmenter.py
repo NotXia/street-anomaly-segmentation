@@ -123,7 +123,7 @@ class PretrainedSegmenter(L.LightningModule):
 class _PretrainedPytorchSegmenter(PretrainedSegmenter):
     def __init__(self, model_name, optimizer_args, image_size, num_classes, class_weights, multi_label):
         super().__init__(optimizer_args, image_size, num_classes, class_weights, multi_label)
-
+        self.model_name = model_name
         match model_name:
             case "deeplabv3_mobilenet":
                 self.model = deeplabv3_mobilenet_v3_large(num_classes=num_classes)
@@ -133,12 +133,14 @@ class _PretrainedPytorchSegmenter(PretrainedSegmenter):
                 raise NotImplementedError("Model not available")
 
     def _forward(self, images):
-        outputs = self.model(images)
-        logits = outputs["out"]
-        return logits, None
+        embeddings = self.model.backbone(images)["out"]
+        logits = self.model.classifier(embeddings)
+        return logits, [embeddings]
         
     def get_hidden_sizes(self):
-        raise NotImplementedError()
+        match self.model_name:
+            case "deeplabv3_mobilenet": return 960
+            case "deeplabv3_resnet50": return 2048
 
 
 class _PretrainedHuggingFaceSegmenter(PretrainedSegmenter):
