@@ -45,18 +45,18 @@ def _prepare_image_for_slic(image):
     image = np.ascontiguousarray(image)
     return image
 
-class SmoothedPredictor(BasePredictor):
+class SuperpixelPredictor(BasePredictor):
     def __init__(self, 
             model: BaseSegmenterAndDetector, 
-            smooth_segmentation = False, 
-            smooth_anomaly = True, 
+            apply_on_segmentation = False, 
+            apply_on_anomaly = True, 
             slic_num_components = 200, 
             slic_compactness = 20,
         ):
         super().__init__(model)
-        assert smooth_segmentation or smooth_anomaly, "Nothing to smooth"
-        self.smooth_segmentation = smooth_segmentation
-        self.smooth_anomaly = smooth_anomaly
+        assert apply_on_segmentation or apply_on_anomaly, "Nothing to segment"
+        self.apply_on_segmentation = apply_on_segmentation
+        self.apply_on_anomaly = apply_on_anomaly
         self.slic_num_components = slic_num_components
         self.slic_compactness = slic_compactness
     
@@ -72,9 +72,9 @@ class SmoothedPredictor(BasePredictor):
             segments = slic.iterate(_prepare_image_for_slic(inputs[i].cpu()))
 
             for j in np.unique(segments):
-                if self.smooth_segmentation:
+                if self.apply_on_segmentation:
                     segm_maps[i, segments == j] = segm_maps[i, segments == j].mode().values
-                if self.smooth_anomaly:
+                if self.apply_on_anomaly:
                     ood_scores[i, segments == j] = ood_scores[i, segments == j].mean()
 
         return segm_maps, ood_scores

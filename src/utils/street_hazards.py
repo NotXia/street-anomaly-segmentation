@@ -150,7 +150,7 @@ def visualize_scene(image: np.ndarray|torch.Tensor, ax=None):
 
 def visualize_anomaly(anomaly_map: np.ndarray|torch.Tensor, alpha=1, ax=None, colorbar=False):
     if ax is None: ax = plt.gca()
-    im = ax.imshow(anomaly_map, alpha=alpha)
+    im = ax.imshow(anomaly_map, alpha=alpha, cmap="turbo")
     ax.set_xticks([])
     ax.set_yticks([])
 
