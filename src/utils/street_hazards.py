@@ -42,7 +42,7 @@ class StreetHazardsDataset(Dataset):
         more_transforms2 = None,
         random_crop_size: Optional[tuple[int, int]] = None,
         add_random_anomalies: bool = False,
-        dataset_path: str = "./data_voc"
+        anomaly_dataset_path: str = "./data_voc"
     ):
         with open(odgt_path, "r") as f:
             odgt_data = json.load(f)
@@ -64,9 +64,9 @@ class StreetHazardsDataset(Dataset):
         self.add_random_anomalies = add_random_anomalies
         if self.add_random_anomalies:
             try:
-                self.ds_anomaly = torchvision.datasets.VOCSegmentation(dataset_path, image_set="val")
+                self.ds_anomaly = torchvision.datasets.VOCSegmentation(anomaly_dataset_path, image_set="val")
             except:
-                self.ds_anomaly = torchvision.datasets.VOCSegmentation(dataset_path, image_set="val", download=True)
+                self.ds_anomaly = torchvision.datasets.VOCSegmentation(anomaly_dataset_path, image_set="val", download=True)
 
     def __getitem__(self, idx):
         image = Image.open(self.paths[idx]["image"]).convert("RGB")
@@ -78,7 +78,7 @@ class StreetHazardsDataset(Dataset):
         annotation = torch.as_tensor(transforms.functional.pil_to_tensor(annotation), dtype=torch.int64) - 1 # Make class indexes start from 0
         annotation = self.more_transforms2(annotation).squeeze(0)
 
-        # Apply random crop
+        # Apply same random crop on image and annotation
         if self.random_crop_size is not None:
             i, j, h, w = transforms.RandomCrop.get_params(image, output_size=self.random_crop_size)
             image = transforms.functional.crop(image, i, j, h, w)
@@ -87,8 +87,11 @@ class StreetHazardsDataset(Dataset):
         # Add random anomaly
         if self.add_random_anomalies:
             for i in range(np.random.randint(1, 4)):
-                anomaly_max_size = (np.random.randint(image.shape[1]*0.1, image.shape[1]*0.3), np.random.randint(image.shape[2]*0.1, image.shape[2]*0.3))
-                i, j, h, w = transforms.RandomCrop.get_params(image, output_size=anomaly_max_size)
+                # Determine position of the anomaly
+                anomaly_size = (np.random.randint(image.shape[1]*0.1, image.shape[1]*0.3), np.random.randint(image.shape[2]*0.1, image.shape[2]*0.3))
+                i, j, h, w = transforms.RandomCrop.get_params(image, output_size=anomaly_size)
+
+                # Choose random image from Pascal VOC
                 possible_classes = []
                 while len(possible_classes) == 0: # In some cases there are no classes available
                     anomaly_idx = np.random.randint(0, len(self.ds_anomaly))
@@ -96,10 +99,12 @@ class StreetHazardsDataset(Dataset):
                     anomaly_annot = torch.from_numpy(np.array(self.ds_anomaly[anomaly_idx][1])).unsqueeze(0)
                     possible_classes = np.unique(anomaly_annot)[1:-1] # Ignore 0 and 255
 
+                # Select random class in chosen image and resize to the resolution of the crop
                 anomaly_class = np.random.choice(possible_classes)
                 anomaly_image = F.interpolate(anomaly_image.unsqueeze(0), size=(h, w), mode="bilinear").squeeze(0)
                 anomaly_annot = F.interpolate(anomaly_annot.unsqueeze(0), size=(h, w), mode="nearest").squeeze((0, 1))
 
+                # Insert anomaly
                 image[:, i:i+h, j:j+w][:, anomaly_annot == anomaly_class] = anomaly_image[:, anomaly_annot == anomaly_class]
                 annotation[i:i+h, j:j+w][anomaly_annot == anomaly_class] = StreetHazardsClasses.ANOMALY
 

@@ -47,7 +47,7 @@ class AutoencoderMDN(BaseSegmenterAndDetector, L.LightningModule):
         super().__init__()
         self.autoencoder = autoencoder
         self.mdn = GaussianMixtureDensityNetwork(self.autoencoder.get_hidden_sizes()[-1], num_gaussians)
-        self.segmenter = pretrained_segmenter.eval() # The segmenter is not trained in this module
+        self.segmenter = pretrained_segmenter.eval() # The segmenter should be already pre-trained
         self.optimizer_args = optimizer_args
     
 

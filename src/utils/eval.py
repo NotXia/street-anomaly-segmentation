@@ -2,7 +2,7 @@ import numpy as np
 from tqdm.auto import tqdm
 
 import torch
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Dataset
 from sklearn.metrics import average_precision_score
 
 from .street_hazards import StreetHazardsClasses
@@ -11,6 +11,7 @@ from .predictor import BasePredictor
 
 class AccumulatorMIoU:
     """
+    Accumulates a confusion matrix and computes mIoU when needed.
     Adapted from https://github.com/VainF/DeepLabV3Plus-Pytorch/blob/master/metrics/stream_metrics.py
     """
     def __init__(self, num_classes, anomaly_index):
@@ -46,6 +47,9 @@ class AccumulatorMIoU:
 
 class AccumulatorAUPR:
     def __init__(self):
+        """
+        Accumulates AUPRs and averages them when needed.
+        """
         self.reset()
 
     def add(self, preds, labels):
@@ -67,7 +71,7 @@ class AccumulatorAUPR:
 @torch.no_grad()
 def evaluate_model(
         predictor: BasePredictor,
-        ds, 
+        ds: Dataset, 
         tot_classes = len(StreetHazardsClasses), 
         anomaly_class = StreetHazardsClasses.ANOMALY,
         batch_size = 1, 
@@ -75,7 +79,10 @@ def evaluate_model(
         compute_ap = True, 
         device = "cuda", 
     ):
-    assert compute_miou or compute_ap
+    """
+    Evaluates a predictor on a dataset.
+    """
+    assert compute_miou or compute_ap, "Requested to compute nothing"
     dl = DataLoader(ds, batch_size=batch_size, shuffle=False)
     predictor.to(device)
     miou_acc = AccumulatorMIoU(tot_classes-1, anomaly_class) if compute_miou else None

@@ -40,7 +40,7 @@ class GaussianMixtureDensityNetwork(torch.nn.Module):
         
 
     @staticmethod
-    def loss(x, weights, means, logvars, reduction="none"):
+    def loss(x, weights, means, logvars, reduction: Literal["none", "mean"]="none"):
         x = x.unsqueeze(-1).expand_as(logvars)
         log_probs = -1 * Normal(means, torch.exp(logvars)).log_prob(x).mean(2) # Aggregate emb_size. Mean is better to uniform varying sizes.
         log_gmm = (weights * log_probs).sum(2)

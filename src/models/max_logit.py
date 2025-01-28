@@ -26,6 +26,10 @@ class MaxLogitModel(BaseSegmenterAndDetector, torch.nn.Module):
 
 class MaxSoftmaxModel(BaseSegmenterAndDetector, torch.nn.Module):
     def __init__(self, segmenter: PretrainedSegmenter):
+        """
+        Maximum softmax probability defined in "A Baseline for Detecting Misclassified and Out-of-Distribution Examples in Neural Networks" 
+        <https://arxiv.org/abs/1610.02136>
+        """
         super().__init__()
         self.segmenter = segmenter.eval()
     
@@ -40,7 +44,9 @@ class MaxSoftmaxModel(BaseSegmenterAndDetector, torch.nn.Module):
 class StandardizedMaxLogitModel(BaseSegmenterAndDetector, torch.nn.Module):
     def __init__(self, segmenter: PretrainedSegmenter):
         """
-        MaxLogit anomaly detector defined in "Scaling Out-of-Distribution Detection for Real-World Settings" <https://arxiv.org/abs/1911.11132>.
+        Standardized MaxLogit anomaly detector defined in 
+        "Standardized Max Logits: A Simple yet Effective Approach for Identifying Unexpected Road Obstacles in Urban-Scene Segmentation" 
+        <https://arxiv.org/abs/2107.11264>.
         """
         super().__init__()
         self.segmenter = segmenter.eval()
@@ -54,12 +60,14 @@ class StandardizedMaxLogitModel(BaseSegmenterAndDetector, torch.nn.Module):
             logits = self.segmenter(images.to(self.segmenter.device))
             segm_preds = torch.argmax(logits, dim=1)
 
+            # Keep track of all logits and predictions
             all_maxlogits.append(logits.cpu().max(dim=1).values)
             all_preds.append(segm_preds.cpu())
 
         all_maxlogits = torch.concat(all_maxlogits, dim=0)
         all_preds = torch.concat(all_preds, dim=0)
 
+        # Compute means and variances for each class
         means = torch.zeros((self.segmenter.num_classes))
         variances = torch.zeros((self.segmenter.num_classes))
         for c in range(self.segmenter.num_classes):

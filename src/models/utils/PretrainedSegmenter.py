@@ -19,6 +19,10 @@ class PretrainedSegmenter(L.LightningModule):
         class_weights: Optional[torch.Tensor],
         multi_label: bool
     ):
+        """
+        Unified interface for PyTorch and (some) Hugging Face models for segmentation.
+        Note: a model should be created using the static `get` method.
+        """
         super().__init__()
         self.model = None
         self.image_size = image_size
@@ -30,7 +34,7 @@ class PretrainedSegmenter(L.LightningModule):
         self.val_miou_acc = AccumulatorMIoU(num_classes, None)
 
 
-    def _forward(self, images) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+    def _forward(self, images) -> tuple[torch.Tensor, Optional[list[torch.Tensor]]]:
         """
         Returns:
             logits
@@ -41,12 +45,14 @@ class PretrainedSegmenter(L.LightningModule):
 
     def forward(self, images, return_hidden_states=False):
         if self.image_size:
+            # Resize to model input size
             original_shape = (images.shape[2], images.shape[3])
             images = F.interpolate(images, self.image_size, mode="bilinear")
 
         logits, hidden_states = self._forward(images)
 
         if self.image_size:
+            # Restore original resolution
             logits = F.interpolate(logits, original_shape, mode="bilinear")
 
         return (logits, hidden_states) if return_hidden_states else logits
@@ -65,6 +71,9 @@ class PretrainedSegmenter(L.LightningModule):
         class_weights: Optional[torch.Tensor] = None,
         multi_label: bool = False
     ):
+        """
+        Creates a segmentation model given a configuration.
+        """
         match model_name:
             case "deeplabv3_mobilenet":
                 return _PretrainedPytorchSegmenter(model_name, optimizer_args, image_size, num_classes, class_weights, multi_label)
@@ -73,6 +82,8 @@ class PretrainedSegmenter(L.LightningModule):
             case _:
                 return _PretrainedHuggingFaceSegmenter(model_name, optimizer_args, image_size, num_classes, class_weights, multi_label)
 
+
+    # Lightning stuff
 
     def configure_optimizers(self):
         optimizer = torch.optim.AdamW(self.model.parameters(), **self.optimizer_args)
@@ -85,7 +96,7 @@ class PretrainedSegmenter(L.LightningModule):
                 loss += F.binary_cross_entropy_with_logits(logits[:, c], (labels == c).type(torch.float32))
             return loss
         else:
-            return F.cross_entropy(logits, labels, weight=self.class_weights)
+            return F.cross_entropy(logits, labels, weight=self.class_weights.to(self.device))
 
     def training_step(self, batch, batch_idx):
         images, labels = batch
@@ -146,7 +157,7 @@ class _PretrainedPytorchSegmenter(PretrainedSegmenter):
 class _PretrainedHuggingFaceSegmenter(PretrainedSegmenter):
     def __init__(self, model_name, optimizer_args, image_size, num_classes, class_weights, multi_label):
         super().__init__(optimizer_args, image_size, num_classes, class_weights, multi_label)
-        transformers.utils.logging.set_verbosity_error() # Suppress warning for non-trained head
+        transformers.utils.logging.set_verbosity_error() # Temporarily suppress warning for non-trained head
         self.processor = AutoImageProcessor.from_pretrained(model_name)
         self.model = AutoModelForSemanticSegmentation.from_pretrained(model_name, num_labels=num_classes, ignore_mismatched_sizes=True)
         self.image_size = (self.model.config.image_size, self.model.config.image_size)
@@ -154,10 +165,7 @@ class _PretrainedHuggingFaceSegmenter(PretrainedSegmenter):
 
     def _forward(self, images):
         inputs = self.processor(images=images, return_tensors="pt", do_resize=False, do_rescale=False).to(self.model.device)
-        outputs = self.model(
-            **inputs,
-            output_hidden_states = True
-        )
+        outputs = self.model(**inputs, output_hidden_states=True)
         logits = outputs.logits
         hidden_states = outputs.hidden_states
 

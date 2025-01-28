@@ -1,3 +1,8 @@
+"""
+Wrapper classes used for inference that output segmentation maps and anomaly scores.
+"""
+
+
 from models.utils.BaseSegmenterAndDetector import BaseSegmenterAndDetector
 import numpy as np
 try:
@@ -5,7 +10,6 @@ try:
 except:
     from fast_slic import Slic
 import torch
-import torch.nn.functional as F
 
 
 class BasePredictor:
@@ -31,6 +35,9 @@ class BasePredictor:
 
 class StandardPredictor(BasePredictor):
     def __init__(self, model: BaseSegmenterAndDetector):
+        """
+        Predictor that applies argmax on segmentation logits and leaves OOD scores as-is.
+        """
         super().__init__(model)
 
     @torch.no_grad()
@@ -40,7 +47,7 @@ class StandardPredictor(BasePredictor):
 
 
 def _prepare_image_for_slic(image):
-    image = np.moveaxis(image.numpy(), 0, -1)
+    image = np.moveaxis(image.numpy(), 0, -1) # H x W x C
     image = (image*255).astype(np.uint8)
     image = np.ascontiguousarray(image)
     return image
@@ -73,8 +80,10 @@ class SuperpixelPredictor(BasePredictor):
 
             for j in np.unique(segments):
                 if self.apply_on_segmentation:
+                    # The segmentation class of a superpixel is the most frequent class within it
                     segm_maps[i, segments == j] = segm_maps[i, segments == j].mode().values
                 if self.apply_on_anomaly:
+                    # The anomaly score of a superpixel is the average of the scores within it
                     ood_scores[i, segments == j] = ood_scores[i, segments == j].mean()
 
         return segm_maps, ood_scores

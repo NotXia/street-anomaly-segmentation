@@ -94,7 +94,6 @@ def get_ood_scores(knn: NearestNeighbors, embeddings: torch.Tensor) -> torch.Ten
     return ood_scores
 
 
-
 class KNNModel(BaseSegmenterAndDetector, torch.nn.Module):
     def __init__(self, segmenter: PretrainedSegmenter, n_neighbors: int=1, hidden_states_index: int=-1):
         """
@@ -145,7 +144,6 @@ class KNNModelAE(KNNModel):
 
         return logits, ood_scores
     
-
 
 class KmeansModel(KNNModel):
     """
